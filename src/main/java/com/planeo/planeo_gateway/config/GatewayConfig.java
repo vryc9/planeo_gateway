@@ -15,6 +15,9 @@ public class GatewayConfig {
     @Value("${planeo.back.url}")
     private String backUrl;
 
+    @Value("${planeo.admin.url}")
+    private String adminUrl;
+
     @Bean
     public RouteLocator routeLocator(RouteLocatorBuilder builder) {
         return builder.routes()
@@ -26,6 +29,10 @@ public class GatewayConfig {
                 .route("planeo-back", r -> r
                         .path("/api/**")
                         .uri(backUrl))
+                .route("planeo-admin", r -> r
+                        .path("/admin/**")
+                        .filters(f -> f.stripPrefix(1))
+                        .uri(adminUrl))
                 .build();
     }
 }
