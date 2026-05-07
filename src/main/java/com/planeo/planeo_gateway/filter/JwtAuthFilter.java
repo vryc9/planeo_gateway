@@ -61,6 +61,12 @@ public class JwtAuthFilter implements GlobalFilter, Ordered {
                 return exchange.getResponse().setComplete();
             }
 
+            String role = claims.get("role", String.class);
+            if (path.startsWith("/admin") && !"ADMIN".equals(role)) {
+                exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
+                return exchange.getResponse().setComplete();
+            }
+
             ServerWebExchange mutatedExchange = exchange.mutate()
                     .request(r -> r.headers(headers -> {
                         headers.set("X-Auth-Username", claims.getSubject());
