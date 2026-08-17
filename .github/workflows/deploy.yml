@@ -1,0 +1,16 @@
+# planeo_auth/.github/workflows/deploy.yml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  call-reusable:
+    uses: vryc9/planeo_infra/.github/workflows/build-and-deploy.yml@main
+    with:
+      service_name: planeo-gateway
+    secrets:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
