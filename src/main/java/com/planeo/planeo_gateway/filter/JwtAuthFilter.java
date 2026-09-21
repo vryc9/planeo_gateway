@@ -18,6 +18,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Date;
 import java.util.List;
 
+import static reactor.netty.http.HttpConnectionLiveness.log;
+
 @Component
 public class JwtAuthFilter implements GlobalFilter, Ordered {
 
@@ -26,7 +28,9 @@ public class JwtAuthFilter implements GlobalFilter, Ordered {
 
     private static final List<String> PUBLIC_ROUTES = List.of(
             "/auth/login",
-            "/auth/refresh"
+            "/auth/refresh",
+            "/admin/invitations/validate/",
+            "/admin/register"
     );
 
     @Override
