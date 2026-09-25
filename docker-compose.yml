@@ -1,0 +1,11 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: planeo-gateway-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - planeo_gateway_redis_data:/data
+
+volumes:
+  planeo_gateway_redis_data:
