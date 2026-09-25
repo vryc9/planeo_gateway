@@ -72,7 +72,13 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
 
         String sessionId = cookie.getValue();
 
+        // A Mono<Void> never carries a value even on success, so switchIfEmpty can't be
+        // chained after flatMapping into chain.filter(...) — it would (wrongly) fire on every
+        // successful proxied response too, trying to write a Set-Cookie header after the
+        // response was already committed. Session resolution is therefore kept as a plain
+        // Mono<SessionData> (erroring, never completing empty) until the very end.
         return sessionStore.find(sessionId)
+                .switchIfEmpty(Mono.error(SessionRejected::new))
                 .flatMap(session -> withValidAccessToken(sessionId, session))
                 .flatMap(session -> {
                     if (path.startsWith("/admin") && !"ADMIN".equals(session.role())) {
@@ -81,7 +87,7 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
                     }
                     return chain.filter(injectIdentityHeaders(exchange, session));
                 })
-                .switchIfEmpty(Mono.defer(() -> expireCookieAndReject(exchange, sessionId)));
+                .onErrorResume(SessionRejected.class, ex -> expireCookieAndReject(exchange, sessionId));
     }
 
     private Mono<SessionData> withValidAccessToken(String sessionId, SessionData session) {
@@ -99,7 +105,14 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
                             claims.getExpiration().toInstant());
                     return sessionStore.save(sessionId, refreshed).thenReturn(refreshed);
                 })
-                .onErrorResume(ex -> sessionStore.delete(sessionId).then(Mono.empty()));
+                .onErrorResume(ex -> sessionStore.delete(sessionId).then(Mono.error(new SessionRejected())));
+    }
+
+    private static final class SessionRejected extends RuntimeException {
+        @Override
+        public synchronized Throwable fillInStackTrace() {
+            return this; // pure control flow, no stack trace needed
+        }
     }
 
     private ServerWebExchange injectIdentityHeaders(ServerWebExchange exchange, SessionData session) {
