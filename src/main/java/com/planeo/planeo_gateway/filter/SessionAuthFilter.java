@@ -12,6 +12,7 @@ import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
 import org.springframework.http.HttpCookie;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
 import org.springframework.stereotype.Component;
@@ -27,7 +28,7 @@ import java.util.List;
 /**
  * Resolves the opaque session cookie against Redis, transparently refreshes the JWT pair when
  * it is close to expiry, and injects Authorization and X-Auth-Username / X-Auth-Role headers
- * before routing to the microservices. Any of those headers sent by the client itself is
+ * before routing to the microservices (X-Auth-Reauth-At carries the last password re-confirmation). Any of those headers sent by the client itself is
  * always stripped first: downstream services trust them blindly, so the gateway must be the
  * only thing that can set them.
  */
@@ -38,6 +39,9 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
             "/admin/invitations/validate/",
             "/admin/register"
     );
+
+    private static final String ACCOUNT_DELETION_PATH = "/api/me/account";
+    private static final String REAUTH_HEADER = "X-Auth-Reauth-At";
 
     private final SessionStore sessionStore;
     private final AuthClient authClient;
@@ -85,9 +89,41 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
                         exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
                         return exchange.getResponse().setComplete();
                     }
+                    if (isAccountDeletion(exchange)) {
+                        return chainThenCloseSession(exchange, chain, sessionId, session);
+                    }
                     return chain.filter(injectIdentityHeaders(exchange, session));
                 })
                 .onErrorResume(SessionRejected.class, ex -> expireCookieAndReject(exchange, sessionId));
+    }
+
+    private static boolean isAccountDeletion(ServerWebExchange exchange) {
+        return HttpMethod.DELETE.equals(exchange.getRequest().getMethod())
+                && ACCOUNT_DELETION_PATH.equals(exchange.getRequest().getURI().getPath());
+    }
+
+    /**
+     * Once planeo_back accepted the deletion, the caller's own session must die immediately:
+     * the Redis entry is removed and the cookie expired (before the response is committed).
+     * Other sessions of the same user are cut by planeo_back, which refuses a pending account,
+     * and cannot be refreshed any more since planeo_auth no longer knows the user.
+     */
+    private Mono<Void> chainThenCloseSession(ServerWebExchange exchange, GatewayFilterChain chain,
+                                             String sessionId, SessionData session) {
+        exchange.getResponse().beforeCommit(() -> {
+            if (exchange.getResponse().getStatusCode() != null
+                    && exchange.getResponse().getStatusCode().is2xxSuccessful()) {
+                exchange.getResponse().addCookie(buildExpiredCookie());
+            }
+            return Mono.empty();
+        });
+        return chain.filter(injectIdentityHeaders(exchange, session))
+                .then(Mono.defer(() -> {
+                    var status = exchange.getResponse().getStatusCode();
+                    return status != null && status.is2xxSuccessful()
+                            ? sessionStore.delete(sessionId).then()
+                            : Mono.<Void>empty();
+                }));
     }
 
     private Mono<SessionData> withValidAccessToken(String sessionId, SessionData session) {
@@ -99,10 +135,8 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
         return authClient.refresh(session.refreshToken())
                 .flatMap(tokens -> {
                     Claims claims = parseClaims(tokens.accessToken());
-                    SessionData refreshed = new SessionData(
-                            session.username(), session.role(),
-                            tokens.accessToken(), tokens.refreshToken(),
-                            claims.getExpiration().toInstant());
+                    SessionData refreshed = session.withTokens(
+                            tokens.accessToken(), tokens.refreshToken(), claims.getExpiration().toInstant());
                     return sessionStore.save(sessionId, refreshed).thenReturn(refreshed);
                 })
                 .onErrorResume(ex -> sessionStore.delete(sessionId).then(Mono.error(new SessionRejected())));
@@ -122,6 +156,9 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
                     headers.set(HttpHeaders.AUTHORIZATION, "Bearer " + session.accessToken());
                     headers.set("X-Auth-Username", session.username());
                     headers.set("X-Auth-Role", session.role());
+                    if (session.reauthenticatedAt() != null) {
+                        headers.set(REAUTH_HEADER, String.valueOf(session.reauthenticatedAt().getEpochSecond()));
+                    }
                 }))
                 .build();
     }
@@ -136,6 +173,7 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
         headers.remove(HttpHeaders.AUTHORIZATION);
         headers.remove("X-Auth-Username");
         headers.remove("X-Auth-Role");
+        headers.remove(REAUTH_HEADER);
     }
 
     private Mono<Void> unauthorized(ServerWebExchange exchange) {
@@ -143,15 +181,18 @@ public class SessionAuthFilter implements GlobalFilter, Ordered {
         return exchange.getResponse().setComplete();
     }
 
-    private Mono<Void> expireCookieAndReject(ServerWebExchange exchange, String sessionId) {
-        ResponseCookie expired = ResponseCookie.from(cookieName, "")
+    private ResponseCookie buildExpiredCookie() {
+        return ResponseCookie.from(cookieName, "")
                 .httpOnly(true)
                 .secure(cookieSecure)
                 .sameSite("Strict")
                 .path("/")
                 .maxAge(Duration.ZERO)
                 .build();
-        exchange.getResponse().addCookie(expired);
+    }
+
+    private Mono<Void> expireCookieAndReject(ServerWebExchange exchange, String sessionId) {
+        exchange.getResponse().addCookie(buildExpiredCookie());
         exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
         return exchange.getResponse().setComplete();
     }
