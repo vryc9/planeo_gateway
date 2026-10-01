@@ -7,6 +7,19 @@ public record SessionData(
         String role,
         String accessToken,
         String refreshToken,
-        Instant accessTokenExpiresAt
+        Instant accessTokenExpiresAt,
+        Instant reauthenticatedAt
 ) {
+    public SessionData(String username, String role, String accessToken, String refreshToken,
+                       Instant accessTokenExpiresAt) {
+        this(username, role, accessToken, refreshToken, accessTokenExpiresAt, null);
+    }
+
+    public SessionData withReauthenticatedAt(Instant at) {
+        return new SessionData(username, role, accessToken, refreshToken, accessTokenExpiresAt, at);
+    }
+
+    public SessionData withTokens(String newAccessToken, String newRefreshToken, Instant newExpiresAt) {
+        return new SessionData(username, role, newAccessToken, newRefreshToken, newExpiresAt, reauthenticatedAt);
+    }
 }

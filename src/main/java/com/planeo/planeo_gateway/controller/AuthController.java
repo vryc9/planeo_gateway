@@ -23,6 +23,7 @@ import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Base64;
 
 /**
@@ -78,6 +79,29 @@ public class AuthController {
                                     .header(HttpHeaders.SET_COOKIE, buildCookie(sessionId).toString())
                                     .body(new UserResponse(username, role)));
                 })
+                .onErrorResume(ex -> Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()));
+    }
+
+    public record ReauthRequest(String password) {}
+
+    /**
+     * Password re-confirmation for sensitive actions (e.g. account deletion). The password is
+     * checked by planeo_auth; on success the session is stamped with the current time, which
+     * the gateway forwards downstream as X-Auth-Reauth-At. A wrong password leaves the session
+     * untouched.
+     */
+    @PostMapping("/reauth")
+    public Mono<ResponseEntity<Void>> reauth(@RequestBody ReauthRequest request, ServerWebExchange exchange) {
+        String sessionId = readSessionId(exchange);
+        if (sessionId == null || request == null || request.password() == null) {
+            return Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED).build());
+        }
+
+        return sessionStore.find(sessionId)
+                .flatMap(session -> authClient.login(session.username(), request.password())
+                        .flatMap(ignored -> sessionStore.save(sessionId, session.withReauthenticatedAt(Instant.now())))
+                        .thenReturn(ResponseEntity.noContent().<Void>build()))
+                .defaultIfEmpty(ResponseEntity.status(HttpStatus.UNAUTHORIZED).build())
                 .onErrorResume(ex -> Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()));
     }
 
